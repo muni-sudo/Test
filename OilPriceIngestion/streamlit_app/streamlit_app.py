@@ -613,14 +613,23 @@ def render_category_tab(category: str):
             "shares with the earlier file are updated in place, new dates are added."
         )
 
+    wide_frames = result.to_wide_frames()
+    # to_wide_frames() fills in each sheet's wide_column_types, so read it after.
+    column_types_by_sheet = {s.sheet_name: s.wide_column_types for s in result.sheets}
+    total_rows = sum(len(df) for df in wide_frames.values())
+
     st.subheader("1. Sheet-level summary — confirm this matches what you expect")
     summary_rows = []
     for sheet in result.sheets:
+        # One table row per date, exactly as the sheet is laid out. len(sheet.rows)
+        # counts parsed cells (date x series), which is a much larger number and
+        # is reported separately as "Price values".
         summary_rows.append({
             "Sheet": sheet.sheet_name,
             "Target table": table_name_for_sheet(category, sheet.sheet_name).split(".")[-1],
             "Price series found": len(sheet.series),
-            "Data rows": len(sheet.rows),
+            "Data rows": len(wide_frames[sheet.sheet_name]),
+            "Price values": len(sheet.rows),
             "Date range": f"{sheet.date_range[0]} to {sheet.date_range[1]}" if sheet.date_range else "—",
             "Warnings": "; ".join(sheet.warnings) if sheet.warnings else "",
         })
@@ -630,11 +639,6 @@ def render_category_tab(category: str):
     any_warnings = summary_df["Warnings"].str.len().gt(0).any()
     if any_warnings:
         st.warning("Some sheets raised warnings during parsing — review them before proceeding.")
-
-    wide_frames = result.to_wide_frames()
-    # to_wide_frames() fills in each sheet's wide_column_types, so read it after.
-    column_types_by_sheet = {s.sheet_name: s.wide_column_types for s in result.sheets}
-    total_rows = sum(len(df) for df in wide_frames.values())
 
     st.subheader("2. Preview — shaped like the source Excel tab, one sheet per tab below")
     sheet_names_with_data = [s.sheet_name for s in result.sheets if not wide_frames[s.sheet_name].empty]
