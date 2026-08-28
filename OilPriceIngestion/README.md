@@ -218,6 +218,29 @@ Expected results:
 
 ---
 
+## 📐 Parsed data model
+
+Each product sheet becomes one wide table shaped like the source Excel tab:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `PRICE_DATE` | DATE | one row per date |
+| `DAY_TYPE` | VARCHAR | set only when the whole sheet shares a status (`SUNDAY`, `CLOSE`) |
+| `<SERIES>_LOW` / `<SERIES>_HIGH` | FLOAT | equal for a single quote; the two ends for a range quote such as `6600-6800`. Mid is `(LOW + HIGH) / 2` |
+| `<SERIES>` | VARCHAR | futures contract label from a `MONTH` column |
+
+The parser handles both report formats from one code path:
+
+- the `DATE` anchor is found wherever it sits (CASTOR starts at column F);
+- header rows **above and below** the DATE row both feed the series name, so
+  qualifiers like `+GST` and the trading centre are preserved;
+- side-by-side sub-tables are flattened and their duplicate `DATE` columns
+  dropped;
+- a contract-month header re-declared mid-sheet (CHINA does this when
+  contracts roll) is skipped instead of loading `SEP`/`NOV` as prices.
+
+---
+
 ## ⚠️ Important Notes
 
 1. **Credentials**: Never commit `credentials.py` with real values to version control

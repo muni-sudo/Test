@@ -14,11 +14,16 @@ sheet-level summary plus an Excel-shaped preview, and write to Snowflake only
 after the user explicitly confirms.
 
 Data model: one wide table per product sheet per category
-(PRICE_NONEDIBLE_FATY, PRICE_NONEDIBLE_LAURICS, ..., and PRICE_EDIBLE_*),
-shaped like the source Excel tab -- one row per PRICE_DATE, one column per
-price series. Re-uploading a file overwrites matching dates (MERGE) rather
-than duplicating them. A new price series is a new column, added automatically
-the first time it's seen.
+(PRICE_NONEDIBLE_FATY, PRICE_NONEDIBLE_LAURICS, ..., and PRICE_EDIBLE_SOYMEAL,
+PRICE_EDIBLE_CASTOR, ...), shaped like the source Excel tab -- one row per
+PRICE_DATE and, per price series, a <SERIES>_LOW / <SERIES>_HIGH FLOAT pair.
+Both hold the same number for a single quote and the two ends for a range
+quote ("6600-6800"), so the mid is always (LOW + HIGH) / 2. A futures MONTH
+column is carried as a single VARCHAR instead.
+
+Re-uploading a file overwrites matching dates (MERGE) rather than duplicating
+them. A new price series is a new column, added automatically the first time
+it's seen.
 """
 import datetime
 import io
@@ -28,6 +33,9 @@ import pandas as pd
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
 from snowflake.snowpark.functions import when_matched, when_not_matched
+from snowflake.snowpark.types import (
+    DateType, DoubleType, StringType, StructField, StructType, TimestampType,
+)
 
 from excel_parser import parse_workbook, sanitize_identifier
 
@@ -47,6 +55,13 @@ FQ_UPLOAD_LOG_TABLE = f"{DATABASE_NAME}.{SCHEMA_NAME}.{UPLOAD_LOG_TABLE}"
 FQ_MAIL_INGEST_PROCEDURE = f"{DATABASE_NAME}.{SCHEMA_NAME}.{MAIL_INGEST_PROCEDURE}"
 MAIL_STAGE_PATH = f"@{DATABASE_NAME}.{SCHEMA_NAME}.{MAIL_STAGE_NAME}/{MAIL_STAGE_FOLDER}"
 BASE_COLUMNS = ["REPORT_MONTH", "SHEET_NAME", "PRICE_DATE", "DAY_TYPE", "LOAD_TIMESTAMP"]
+BASE_COLUMN_TYPES = {
+    "REPORT_MONTH": "VARCHAR(50)",
+    "SHEET_NAME": "VARCHAR(100)",
+    "PRICE_DATE": "DATE",
+    "DAY_TYPE": "VARCHAR(50)",
+    "LOAD_TIMESTAMP": "TIMESTAMP_NTZ",
+}
 
 INPUT_MODE_UPLOAD = "Upload file"
 INPUT_MODE_MAIL = "Read from mail"
@@ -68,9 +83,11 @@ CATEGORIES = {
         "tab_label": "Edible Oils",
         "table_example": "PRICE_EDIBLE_*",
         "description": (
-            "Provide the monthly edible oils price report. Every product sheet is "
-            "parsed into a preview shaped like the original Excel tab below — "
-            "nothing is written to Snowflake until you confirm."
+            "Provide the monthly `*_EDIBLE_OIL_RATE_LIST_*.xlsx` report. All 24 "
+            "product sheets (SOYMEAL, SOYBEAN, MUSTARD, PALM OIL, CASTOR, CHINA, "
+            "WHEAT, ...) are parsed into a preview shaped like the original Excel "
+            "tab below — nothing is written to Snowflake until you confirm. "
+            "Range quotes like `6600-6800` are kept as a LOW/HIGH pair."
         ),
     },
 }
@@ -158,7 +175,13 @@ def already_uploaded(category: str, file_name: str) -> int:
         return 0
 
 
-def ensure_table(table_fqn: str, series_columns: list):
+def ensure_table(table_fqn: str, series_columns: list, column_types: dict):
+    """Create the sheet's table if absent, then add any series column it lacks.
+
+    A price series is two FLOAT columns (<SERIES>_LOW / <SERIES>_HIGH); a
+    futures MONTH label is a single VARCHAR. The parser decides which, so the
+    column type comes from its wide_column_types map.
+    """
     session.sql(f"""
         CREATE TABLE IF NOT EXISTS {table_fqn} (
             REPORT_MONTH VARCHAR(50),
@@ -171,16 +194,55 @@ def ensure_table(table_fqn: str, series_columns: list):
     existing = set(session.table(table_fqn).schema.names)
     for col in series_columns:
         if col not in existing:
-            session.sql(f'ALTER TABLE {table_fqn} ADD COLUMN "{col}" FLOAT').collect()
+            sql_type = "VARCHAR" if column_types.get(col) == "VARCHAR" else "FLOAT"
+            session.sql(f'ALTER TABLE {table_fqn} ADD COLUMN "{col}" {sql_type}').collect()
 
 
-def upsert_sheet(category: str, sheet_name: str, wide_df: pd.DataFrame, report_month: str, load_ts) -> int:
+def _snowpark_schema(ordered_cols: list, column_types: dict) -> StructType:
+    """Explicit schema for the staged frame.
+
+    Snowpark infers a column's type from pandas dtypes, which silently gets it
+    wrong for a column that is entirely null on a given month -- common here,
+    since a series can be NA for every day of a month. Naming the types keeps
+    the MERGE stable regardless of what a particular file contains.
+    """
+    fields = []
+    for col in ordered_cols:
+        declared = BASE_COLUMN_TYPES.get(col) or column_types.get(col, "FLOAT")
+        if declared.startswith("TIMESTAMP"):
+            dtype = TimestampType()
+        elif declared.startswith("DATE"):
+            dtype = DateType()
+        elif declared.startswith("VARCHAR"):
+            dtype = StringType()
+        else:
+            dtype = DoubleType()
+        fields.append(StructField(col, dtype))
+    return StructType(fields)
+
+
+def _frame_to_rows(out: pd.DataFrame) -> list:
+    """pandas frame -> plain Python rows, with every NaN/NaT flattened to None."""
+    clean = out.astype(object).where(pd.notna(out), None)
+    rows = []
+    for record in clean.values.tolist():
+        row = []
+        for value in record:
+            if isinstance(value, pd.Timestamp):
+                value = value.to_pydatetime()
+            row.append(value)
+        rows.append(row)
+    return rows
+
+
+def upsert_sheet(category: str, sheet_name: str, wide_df: pd.DataFrame, report_month: str,
+                 load_ts, column_types: dict) -> int:
     series_columns = [c for c in wide_df.columns if c not in ("PRICE_DATE", "DAY_TYPE")]
     table_fqn = table_name_for_sheet(category, sheet_name)
-    ensure_table(table_fqn, series_columns)
+    ensure_table(table_fqn, series_columns, column_types)
 
     out = wide_df.copy()
-    out["PRICE_DATE"] = pd.to_datetime(out["PRICE_DATE"])
+    out["PRICE_DATE"] = pd.to_datetime(out["PRICE_DATE"]).dt.date
     out["REPORT_MONTH"] = report_month
     out["SHEET_NAME"] = sheet_name
     out["LOAD_TIMESTAMP"] = load_ts
@@ -188,7 +250,9 @@ def upsert_sheet(category: str, sheet_name: str, wide_df: pd.DataFrame, report_m
     ordered_cols = BASE_COLUMNS + series_columns
     out = out[ordered_cols]
 
-    source = session.create_dataframe(out)
+    source = session.create_dataframe(
+        _frame_to_rows(out), schema=_snowpark_schema(ordered_cols, column_types)
+    )
     target = session.table(table_fqn)
 
     update_cols = ["REPORT_MONTH", "DAY_TYPE", "LOAD_TIMESTAMP"] + series_columns
@@ -204,13 +268,16 @@ def upsert_sheet(category: str, sheet_name: str, wide_df: pd.DataFrame, report_m
 
 
 def load_workbook(category: str, wide_frames: dict, file_name: str, report_month: str,
-                  input_source: str):
+                  input_source: str, column_types_by_sheet: dict):
     load_ts = datetime.datetime.utcnow()
     total_rows = 0
     for sheet_name, wide_df in wide_frames.items():
         if wide_df.empty:
             continue
-        total_rows += upsert_sheet(category, sheet_name, wide_df, report_month, load_ts)
+        total_rows += upsert_sheet(
+            category, sheet_name, wide_df, report_month, load_ts,
+            column_types_by_sheet.get(sheet_name, {}),
+        )
 
     ensure_upload_log_table()
     session.sql(
@@ -445,6 +512,8 @@ def render_category_tab(category: str):
         st.warning("Some sheets raised warnings during parsing — review them before proceeding.")
 
     wide_frames = result.to_wide_frames()
+    # to_wide_frames() fills in each sheet's wide_column_types, so read it after.
+    column_types_by_sheet = {s.sheet_name: s.wide_column_types for s in result.sheets}
     total_rows = sum(len(df) for df in wide_frames.values())
 
     st.subheader("2. Preview — shaped like the source Excel tab, one sheet per tab below")
@@ -474,7 +543,10 @@ def render_category_tab(category: str):
         input_source = "MAIL" if input_mode == INPUT_MODE_MAIL else "UPLOAD"
         try:
             with st.spinner("Writing to Snowflake..."):
-                rows_written = load_workbook(category, wide_frames, file_name, report_month, input_source)
+                rows_written = load_workbook(
+                    category, wide_frames, file_name, report_month, input_source,
+                    column_types_by_sheet,
+                )
             st.success(f"Loaded {rows_written:,} rows from {file_name}.")
         except Exception as exc:
             st.error(f"Insert failed: {exc}")
