@@ -198,24 +198,51 @@ Expected:
 
 ### Step 1: Upload Streamlit Files to Streamlit Stage
 
-If using Streamlit-in-Snowflake, upload to your Streamlit code stage:
-- `streamlit_app/streamlit_app.py`
-- `streamlit_app/excel_parser.py`
+Upload **all three** files to the same folder on your Streamlit code stage:
+- `streamlit_app/streamlit_app.py` — the main file
+- `streamlit_app/excel_parser.py` — imported by the app
+- `streamlit_app/environment.yml` — **required**; pins the Streamlit version
+  and pulls in `openpyxl`, which is not in the default environment
+
+Omitting `environment.yml` is the most common deployment failure: the app
+starts on Streamlit 1.22.0, where `st.file_uploader` is unsupported, and
+`import openpyxl` fails.
+
+The stage must be an internal stage with Snowflake server-side encryption:
+
+```sql
+CREATE STAGE IF NOT EXISTS DB_DW_DEV.RPT_TRADERS_BM_SANDBOX.OILPRICEINGESTION
+  DIRECTORY = (ENABLE = TRUE)
+  ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
+```
 
 ### Step 2: Create/Update Streamlit App
 
-In Snowflake, create a new Streamlit app or update existing:
-- Title: "Oil Price Report Uploader"
-- Code location: Path to `streamlit_app.py`
-- Warehouse: `TRADER_ANALYSIS_WH`
+```sql
+CREATE OR REPLACE STREAMLIT DB_DW_DEV.RPT_TRADERS_BM_SANDBOX.OIL_PRICE_UPLOADER
+ROOT_LOCATION = '@DB_DW_DEV.RPT_TRADERS_BM_SANDBOX.OILPRICEINGESTION/streamlit_app'
+MAIN_FILE = '/streamlit_app.py'
+QUERY_WAREHOUSE = 'TRADER_ANALYSIS_WH'
+TITLE = 'Oil Price Report Uploader'
+COMMENT = 'Oil Price Report Uploader - Upload or fetch from mail, parse, and load to Snowflake';
+```
+
+Note: `CREATE OR REPLACE` gives the app a new URL and drops existing grants.
+If the app already exists and only the code changed, just re-upload the files
+to the stage and refresh the app — no DDL needed.
+
+The app runs with **owner's rights**. Grant the owning role `READ` on the
+`DYNAMIC_FILE_INGESTION` stage (for "Read from mail"), plus `CREATE TABLE`,
+`SELECT` and `INSERT` on `RPT_TRADERS_BM_SANDBOX`.
 
 ### Step 3: Open App & Test
 
 1. Open Streamlit app
-2. Go to **Edible Oils** tab
-3. Click **"Fetch latest from mail"**
-4. Verify it shows your test file
-5. Review the parsed summary
+2. Go to either tab — **Non-Edible Oils** or **Edible Oils**
+3. Choose **"Read from mail"**, pick your test file, click **"Use this file"**
+   (or choose **"Upload file"** and upload one manually)
+4. Verify the sheet-level summary and preview look right
+5. Tick the confirmation checkbox
 6. Click **"Insert into Snowflake"** to test load
 
 Expected:

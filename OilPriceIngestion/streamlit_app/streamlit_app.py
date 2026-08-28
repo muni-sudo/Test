@@ -81,6 +81,12 @@ except Exception:
 
 
 # --- Snowflake helpers ---------------------------------------------------
+def rerun():
+    """st.rerun() landed in Streamlit 1.27; older runtimes only have the
+    experimental alias."""
+    (getattr(st, "rerun", None) or st.experimental_rerun)()
+
+
 def table_name_for_sheet(category: str, sheet_name: str) -> str:
     return f"{DATABASE_NAME}.{SCHEMA_NAME}.PRICE_{category}_{sanitize_identifier(sheet_name)}"
 
@@ -315,7 +321,7 @@ def render_mail_input(key: str):
     col_status.success(f"Loaded from mail: **{loaded['file_name']}**")
     if col_clear.button("Clear", key=f"{key}_mail_clear"):
         del st.session_state[loaded_key]
-        st.rerun()
+        rerun()
 
     return loaded["file_name"], io.BytesIO(loaded["content"])
 

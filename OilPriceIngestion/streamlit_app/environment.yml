@@ -2,5 +2,11 @@ name: app_environment
 channels:
   - snowflake
 dependencies:
+  # Without an explicit pin, Streamlit-in-Snowflake runs this app on 1.22.0,
+  # where st.file_uploader is unsupported. 1.26 is the documented minimum for
+  # the uploader; 1.27 adds st.rerun. Check what your account offers with:
+  #   SELECT PACKAGE_NAME, VERSION FROM INFORMATION_SCHEMA.PACKAGES
+  #   WHERE PACKAGE_NAME = 'streamlit' AND LANGUAGE = 'python' ORDER BY VERSION;
+  - streamlit=1.35.0
   - openpyxl
   - pandas
