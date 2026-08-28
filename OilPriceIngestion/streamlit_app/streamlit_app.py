@@ -4,14 +4,33 @@ Oil Price Report Uploader (Streamlit in Snowflake)
 One app, two categories (Non-Edible / Edible oils), two input modes each:
 
   1. Upload file    -- the user picks the monthly price-report .xlsx manually.
-  2. Read from mail -- the user picks a file that the mail-ingestion job has
-                       already staged from the shared mailbox
-                       ("Edible & Non Edible Oils" emails) to
-                       @DYNAMIC_FILE_INGESTION/OILS/{date}/.
+  2. Read from mail -- the user picks a file the mail-ingestion job has staged
+                       from the shared mailbox ("Edible & Non Edible Oils").
+
+Both land in the same place: @DYNAMIC_FILE_INGESTION/OILS/{date}/. A manual
+upload is copied there on load, so the stage is a complete record of every
+file ingested however it arrived.
+
+The file name drives two decisions, so neither is left to the user:
+
+  category      "NON EDIBLE" or "EDIBLE" in the name. A file is only offered,
+                and only accepted, on its own tab -- both reports carry CASTOR
+                and LINSEED sheets, so loading one on the wrong tab would write
+                into the other category's tables.
+  report month  the month and year in the name, normalised to MONTH_YYYY. Both
+                families abbreviate inconsistently ("JUL EDIBLE OIL RATE LIST
+                2025" but "JULY NON EDIBLE 2025"), so both forms are accepted.
 
 Whichever the source, the flow is identical: parse the workbook, show a
 sheet-level summary plus an Excel-shaped preview, and write to Snowflake only
 after the user explicitly confirms.
+
+Re-loading is safe by construction: every write is a MERGE on PRICE_DATE, so a
+file that has been through before rewrites its own dates rather than adding
+rows. Loads are logged with a SHA-256 of the file, which separates the two
+cases worth telling apart -- the byte-identical file arriving twice (blocked
+behind a tick box, since it can only be a no-op) from a revised file for a
+month already loaded (allowed, and flagged as a revision).
 
 Data model: one wide table per product sheet per category
 (PRICE_NONEDIBLE_FATY, PRICE_NONEDIBLE_LAURICS, ..., and PRICE_EDIBLE_SOYMEAL,
@@ -26,7 +45,9 @@ them. A new price series is a new column, added automatically the first time
 it's seen.
 """
 import datetime
+import hashlib
 import io
+import os
 import re
 
 import pandas as pd
@@ -45,7 +66,7 @@ SCHEMA_NAME = "RPT_TRADERS_BM_SANDBOX"
 UPLOAD_LOG_TABLE = "OIL_PRICE_UPLOAD_LOG"
 WAREHOUSE_NAME = "TRADER_ANALYSIS_WH"
 MAIL_STAGE_NAME = "DYNAMIC_FILE_INGESTION"
-MAIL_STAGE_FOLDER = "OILS"  # mail ingestion stages to {stage}/OILS/{date}/
+MAIL_STAGE_FOLDER = "OILS"  # both mail ingestion and manual uploads land here
 MAIL_INGEST_PROCEDURE = "SP_MAIL_INGEST"
 MAIL_INGEST_JOB_NAME = "OILS"
 MAX_MAIL_FILES_LISTED = 20
@@ -115,25 +136,49 @@ _MONTH_NAMES = (
     "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
     "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER",
 )
+# Both report families abbreviate the month inconsistently -- "JUL EDIBLE OIL
+# RATE LIST 2025" but "JULY NON EDIBLE 2025" -- so accept the full name, the
+# three-letter form, and "SEPT", and normalise to the full name.
+_MONTH_BY_TOKEN = {t: full for full in _MONTH_NAMES for t in (full, full[:3])}
+_MONTH_BY_TOKEN["SEPT"] = "SEPTEMBER"
+# Longest alternative first so JULY wins over JUL; the look-arounds stop a
+# token matching inside a longer word.
+_MONTH_RE = re.compile(
+    r"(?<![A-Z])(%s)(?![A-Z])" % "|".join(sorted(_MONTH_BY_TOKEN, key=len, reverse=True))
+)
+_YEAR_RE = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
 
 
-def guess_report_month(file_name: str) -> str:
-    """Guess REPORT_MONTH from the file name.
+def normalize_file_name(file_name: str) -> str:
+    """Upper-case, drop the extension, and flatten separators, so that
+    "JULY_NON_EDIBLE_2026.xlsx" and "JULY  NON EDIBLE 2026.xlsx" read alike."""
+    stem = os.path.splitext(file_name)[0]
+    return re.sub(r"[^A-Z0-9]+", " ", stem.upper()).strip()
 
-    Matches "JULY_NON_EDIBLE_2026.xlsx", "JULY NON EDIBLE 2026.xlsx" and
-    "JULY_EDIBLE_2026.xlsx" alike; falls back to any month name + 4-digit
-    year found anywhere in the name (so edible reports without the literal
-    "EDIBLE" token still get a guess).
-    """
-    match = re.search(r"([A-Za-z]+)[\s_]+(?:NON[\s_]+)?EDIBLE[\s_]+(\d{4})", file_name, re.IGNORECASE)
-    if match:
-        return f"{match.group(1).upper()}_{match.group(2)}"
-    upper = file_name.upper()
-    month = next((m for m in _MONTH_NAMES if m in upper), None)
-    year = re.search(r"(20\d{2})", file_name)
+
+def detect_category(file_name: str) -> str | None:
+    """Which report a file is, from its name. "NON EDIBLE" is checked first
+    because it contains "EDIBLE"."""
+    name = normalize_file_name(file_name)
+    if "NON EDIBLE" in name:
+        return "NONEDIBLE"
+    if "EDIBLE" in name:
+        return "EDIBLE"
+    return None
+
+
+def report_month_from_name(file_name: str) -> str | None:
+    """Report month as MONTH_YYYY, or None if the name does not carry one."""
+    name = normalize_file_name(file_name)
+    month = _MONTH_RE.search(name)
+    year = _YEAR_RE.search(name)
     if month and year:
-        return f"{month}_{year.group(1)}"
-    return ""
+        return f"{_MONTH_BY_TOKEN[month.group(1)]}_{year.group(1)}"
+    return None
+
+
+def file_digest(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 
 def get_current_user() -> str:
@@ -151,28 +196,45 @@ def ensure_upload_log_table():
             ROWS_INSERTED NUMBER,
             SHEETS_PARSED NUMBER,
             STATUS VARCHAR(20),
-            INPUT_SOURCE VARCHAR(20)
+            INPUT_SOURCE VARCHAR(20),
+            FILE_HASH VARCHAR(64),
+            STAGE_PATH VARCHAR(1000)
         )
     """).collect()
-    # Older deployments may predate INPUT_SOURCE.
-    try:
-        session.sql(
-            f"ALTER TABLE {FQ_UPLOAD_LOG_TABLE} ADD COLUMN IF NOT EXISTS INPUT_SOURCE VARCHAR(20)"
-        ).collect()
-    except Exception:
-        pass
+    # Older deployments predate these columns.
+    for col, coltype in (("INPUT_SOURCE", "VARCHAR(20)"),
+                         ("FILE_HASH", "VARCHAR(64)"),
+                         ("STAGE_PATH", "VARCHAR(1000)")):
+        try:
+            session.sql(
+                f"ALTER TABLE {FQ_UPLOAD_LOG_TABLE} ADD COLUMN IF NOT EXISTS {col} {coltype}"
+            ).collect()
+        except Exception:
+            pass
 
 
-def already_uploaded(category: str, file_name: str) -> int:
+def previous_loads(category: str, report_month: str, digest: str) -> dict:
+    """How this file relates to what has already been loaded.
+
+    Returns counts of earlier successful loads of the byte-identical file and
+    of the same report month, plus when the identical file last went in.
+    """
+    empty = {"same_file": 0, "same_month": 0, "last_loaded": None}
     try:
         rows = session.sql(
-            f"SELECT COUNT(*) FROM {FQ_UPLOAD_LOG_TABLE} WHERE CATEGORY = ? AND FILE_NAME = ?",
-            params=[category, file_name],
+            f"""SELECT COUNT_IF(FILE_HASH = ?) AS SAME_FILE,
+                       COUNT_IF(REPORT_MONTH = ?) AS SAME_MONTH,
+                       MAX(CASE WHEN FILE_HASH = ? THEN UPLOAD_TIMESTAMP END) AS LAST_LOADED
+                FROM {FQ_UPLOAD_LOG_TABLE}
+                WHERE CATEGORY = ? AND STATUS = 'SUCCESS'""",
+            params=[digest, report_month, digest, category],
         ).collect()
-        return rows[0][0]
     except Exception:
         # Log table may not exist yet in a fresh environment.
-        return 0
+        return empty
+    if not rows:
+        return empty
+    return {"same_file": rows[0][0], "same_month": rows[0][1], "last_loaded": rows[0][2]}
 
 
 def ensure_table(table_fqn: str, series_columns: list, column_types: dict):
@@ -268,8 +330,12 @@ def upsert_sheet(category: str, sheet_name: str, wide_df: pd.DataFrame, report_m
 
 
 def load_workbook(category: str, wide_frames: dict, file_name: str, report_month: str,
-                  input_source: str, column_types_by_sheet: dict):
+                  input_source: str, column_types_by_sheet: dict, digest: str,
+                  content: bytes):
     load_ts = datetime.datetime.utcnow()
+    # A manual upload is staged alongside the mail-ingested files; one that came
+    # from the stage is already there.
+    stage_path = stage_upload(file_name, content) if input_source == "UPLOAD" else None
     total_rows = 0
     for sheet_name, wide_df in wide_frames.items():
         if wide_df.empty:
@@ -283,10 +349,10 @@ def load_workbook(category: str, wide_frames: dict, file_name: str, report_month
     session.sql(
         f"""INSERT INTO {FQ_UPLOAD_LOG_TABLE}
             (CATEGORY, FILE_NAME, REPORT_MONTH, UPLOADED_BY, UPLOAD_TIMESTAMP,
-             ROWS_INSERTED, SHEETS_PARSED, STATUS, INPUT_SOURCE)
-            SELECT ?, ?, ?, ?, ?, ?, ?, 'SUCCESS', ?""",
+             ROWS_INSERTED, SHEETS_PARSED, STATUS, INPUT_SOURCE, FILE_HASH, STAGE_PATH)
+            SELECT ?, ?, ?, ?, ?, ?, ?, 'SUCCESS', ?, ?, ?""",
         params=[category, file_name, report_month, get_current_user(), load_ts,
-                total_rows, len(wide_frames), input_source],
+                total_rows, len(wide_frames), input_source, digest, stage_path],
     ).collect()
     return total_rows
 
@@ -321,6 +387,16 @@ def list_mail_stage_files() -> list:
     return files[:MAX_MAIL_FILES_LISTED]
 
 
+def stage_upload(file_name: str, content: bytes) -> str:
+    """Copy a manually uploaded file into the same stage folder the mail job
+    writes to, so every ingested file has one home and an audit copy."""
+    stage_path = f"{MAIL_STAGE_PATH}/{datetime.date.today()}/{file_name}"
+    session.file.put_stream(
+        io.BytesIO(content), stage_path, auto_compress=False, overwrite=True
+    )
+    return stage_path
+
+
 def read_stage_file(stage_path: str) -> io.BytesIO:
     with session.file.get_stream(stage_path, decompress=False) as stream:
         return io.BytesIO(stream.read())
@@ -349,12 +425,14 @@ def show_ingest_status(status: str):
         st.info(status)
 
 
-def render_mail_input(key: str):
-    """'Read from mail' input mode. Returns (file_name, BytesIO) or (None, None).
+def render_mail_input(key: str, category: str):
+    """'Read from mail' input mode. Returns (file_name, bytes) or (None, None).
+
+    Only files whose name identifies them as this tab's category are offered,
+    so an edible report cannot be loaded into the non-edible tables.
 
     The chosen file is kept in st.session_state so it survives Streamlit's
-    rerun on every widget interaction (editing the report month, ticking the
-    confirm checkbox, ...).
+    rerun on every widget interaction (ticking the confirm checkbox, ...).
     """
     files_key = "mail_stage_files"  # shared across tabs: one LIST serves both
     loaded_key = f"{key}_mail_loaded"
@@ -389,11 +467,15 @@ def render_mail_input(key: str):
             st.error(f"Could not list files in the mail stage: {exc}")
             st.session_state[files_key] = []
 
-    files = st.session_state.get(files_key, [])
+    all_files = st.session_state.get(files_key, [])
+    files = [f for f in all_files if detect_category(f["file_name"]) == category]
     if not files:
+        other = len(all_files) - len(files)
         st.warning(
-            "No files found in the mail stage. Click **Fetch new mail now** to "
-            "check the mailbox, or confirm a matching email has actually arrived."
+            f"No {CATEGORIES[category]['tab_label']} files in the stage"
+            + (f" ({other} file(s) here belong to the other category)." if other else ".")
+            + " Click **Fetch new mail now** to check the mailbox, or confirm a"
+            " matching email has actually arrived."
         )
         return None, None
 
@@ -405,7 +487,7 @@ def render_mail_input(key: str):
         return f"{f['file_name']}  ({modified}, {f['size_kb']} KB)"
 
     selected = st.selectbox(
-        f"Files found (newest first, showing up to {MAX_MAIL_FILES_LISTED})",
+        f"{CATEGORIES[category]['tab_label']} files found (newest first)",
         options=files,
         format_func=_label,
         key=f"{key}_mail_select",
@@ -432,7 +514,7 @@ def render_mail_input(key: str):
         del st.session_state[loaded_key]
         rerun()
 
-    return loaded["file_name"], io.BytesIO(loaded["content"])
+    return loaded["file_name"], loaded["content"]
 
 
 # --- Shared review-and-load flow -----------------------------------------
@@ -454,23 +536,52 @@ def render_category_tab(category: str):
     )
 
     file_name = None
-    file_bytes = None
+    content = None
     if input_mode == INPUT_MODE_UPLOAD:
         uploaded_file = st.file_uploader("Choose the Excel file", type=["xlsx"], key=f"{key}_uploader")
         if uploaded_file is not None:
             file_name = uploaded_file.name
-            file_bytes = io.BytesIO(uploaded_file.getvalue())
+            content = uploaded_file.getvalue()
         else:
             st.info("Upload a file to begin.")
     else:
-        file_name, file_bytes = render_mail_input(key)
+        file_name, content = render_mail_input(key, category)
 
-    if file_bytes is None or file_name is None:
+    if content is None or file_name is None:
+        return
+
+    # --- the file must be this tab's report -------------------------------
+    file_category = detect_category(file_name)
+    if file_category is None:
+        st.error(
+            f"Cannot tell which report **{file_name}** is from its name. Expected "
+            "the name to contain 'NON EDIBLE' or 'EDIBLE', as in "
+            "`JULY NON EDIBLE 2026.xlsx` or `JUL EDIBLE OIL RATE LIST 2026.xlsx`. "
+            "Rename the file and try again."
+        )
+        return
+    if file_category != category:
+        st.error(
+            f"**{file_name}** is a {CATEGORIES[file_category]['tab_label']} report, "
+            f"but this is the {cfg['tab_label']} tab. Load it on the "
+            f"**{CATEGORIES[file_category]['tab_label']}** tab instead — loading it "
+            "here would write its sheets into the wrong tables."
+        )
+        return
+
+    # --- the report month comes from the file name ------------------------
+    report_month = report_month_from_name(file_name)
+    if not report_month:
+        st.error(
+            f"Could not read a month and year from **{file_name}**. Expected a name "
+            "like `JULY NON EDIBLE 2026.xlsx` or `JUL EDIBLE OIL RATE LIST 2026.xlsx`. "
+            "Rename the file and try again."
+        )
         return
 
     with st.spinner("Parsing workbook..."):
         try:
-            result = parse_workbook(file_bytes, file_name)
+            result = parse_workbook(io.BytesIO(content), file_name)
         except Exception as exc:
             st.error(f"Could not parse this file: {exc}")
             st.stop()
@@ -479,18 +590,27 @@ def render_category_tab(category: str):
         st.warning("No data rows were found in this file. Please check the file and try again.")
         st.stop()
 
-    default_month = guess_report_month(file_name)
-    report_month = st.text_input(
-        "Report month (used to tag this load — edit if it was guessed wrong)",
-        value=default_month,
-        key=f"{key}_report_month",
-    )
+    st.success(f"Report month **{report_month}**, read from the file name.")
 
-    prior_count = already_uploaded(category, file_name)
-    if prior_count > 0:
+    # --- has this been loaded before? --------------------------------------
+    digest = file_digest(content)
+    prior = previous_loads(category, report_month, digest)
+    reload_identical = False
+    if prior["same_file"]:
+        when = prior["last_loaded"].strftime("%Y-%m-%d %H:%M") if prior["last_loaded"] else "earlier"
         st.warning(
-            f"A file named **{file_name}** was already loaded {prior_count} time(s) before. "
-            "Re-loading will overwrite matching dates in the target tables, not duplicate them."
+            f"This exact file has already been loaded ({when}). Loading it again "
+            "would rewrite the same dates with the same values — harmless, but "
+            "pointless. Tick below only if you mean to re-run it."
+        )
+        reload_identical = st.checkbox(
+            "Load this identical file again anyway", key=f"{key}_reload_identical"
+        )
+    elif prior["same_month"]:
+        st.info(
+            f"A different file for **{report_month}** has already been loaded "
+            f"{prior['same_month']} time(s). This looks like a revision: dates it "
+            "shares with the earlier file are updated in place, new dates are added."
         )
 
     st.subheader("1. Sheet-level summary — confirm this matches what you expect")
@@ -528,26 +648,27 @@ def render_category_tab(category: str):
     st.write(
         f"This will write **{total_rows:,} rows** across **{len(sheet_names_with_data)} sheets** "
         f"(one table per sheet, e.g. `{cfg['table_example']}`), tagged as report month "
-        f"**{report_month or '(not set)'}**. Matching dates already in a table are overwritten; "
+        f"**{report_month}**. Matching dates already in a table are overwritten; "
         "new dates are inserted."
     )
     confirmed = st.checkbox("I have reviewed the data above and it looks correct.", key=f"{key}_confirm")
+    blocked = prior["same_file"] and not reload_identical
     load_clicked = st.button(
-        "Insert into Snowflake", type="primary", disabled=not confirmed, key=f"{key}_insert"
+        "Insert into Snowflake", type="primary",
+        disabled=not confirmed or blocked, key=f"{key}_insert",
     )
 
     if load_clicked:
-        if not report_month:
-            st.error("Please set a report month before loading.")
-            st.stop()
         input_source = "MAIL" if input_mode == INPUT_MODE_MAIL else "UPLOAD"
         try:
             with st.spinner("Writing to Snowflake..."):
                 rows_written = load_workbook(
                     category, wide_frames, file_name, report_month, input_source,
-                    column_types_by_sheet,
+                    column_types_by_sheet, digest, content,
                 )
-            st.success(f"Loaded {rows_written:,} rows from {file_name}.")
+            st.success(
+                f"Loaded {rows_written:,} rows from {file_name} as {report_month}."
+            )
         except Exception as exc:
             st.error(f"Insert failed: {exc}")
 

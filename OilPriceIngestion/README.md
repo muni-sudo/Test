@@ -108,16 +108,45 @@ Upload to Snowflake Streamlit stage:
 ### Phase 2: Streamlit Workflow
 1. User opens either tab — "Non-Edible Oils" or "Edible Oils"
 2. Two input options on **both** tabs:
-   - **Upload file** → Manual upload
+   - **Upload file** → Manual upload. The file is copied to the same stage
+     folder the mail job writes to, so every ingested file has one home.
    - **Read from mail** → Pick from the files staged by mail ingestion
      (newest first, with date and size shown). **Fetch new mail now** runs
      the ingestion job on demand — no need to wait for the scheduled task —
      and refreshes the list.
-3. Parse workbook with `excel_parser.py`
-4. Review sheet summary & data preview
-5. Confirm & load to `PRICE_NONEDIBLE_*` / `PRICE_EDIBLE_*` tables
-6. Log to `OIL_PRICE_UPLOAD_LOG` (including whether the file came from
-   UPLOAD or MAIL)
+3. Each tab only offers, and only accepts, files whose name identifies them as
+   its own category — both reports contain CASTOR and LINSEED sheets, so a
+   file loaded on the wrong tab would write into the wrong tables
+4. Report month is read from the file name — nothing to type
+5. Parse workbook with `excel_parser.py`
+6. Review sheet summary & data preview
+7. Confirm & load to `PRICE_NONEDIBLE_*` / `PRICE_EDIBLE_*` tables
+8. Log to `OIL_PRICE_UPLOAD_LOG` (source UPLOAD/MAIL, file hash, stage path)
+
+### File naming
+
+The name decides the category and the report month, so it has to carry both:
+
+| Report | Example | Read as |
+|--------|---------|---------|
+| Non-edible | `JULY NON EDIBLE 2026.xlsx`, `JULY_NON_EDIBLE_2026.xlsx` | NONEDIBLE, `JULY_2026` |
+| Edible | `JUL EDIBLE OIL RATE LIST 2025.xlsx` | EDIBLE, `JULY_2025` |
+
+Full and three-letter month names are both accepted (`JUL` = `JULY`), as are
+underscores, single and double spaces. A name the app cannot read is rejected
+with an explanation rather than loaded under a guess.
+
+### Duplicate files
+
+Every write is a `MERGE` on `PRICE_DATE`, so re-loading never duplicates rows —
+it rewrites the dates it carries. On top of that the app hashes each file:
+
+- **Byte-identical file already loaded** → blocked behind a tick box, since
+  re-running it can only rewrite the same values with the same values.
+- **Different file, month already loaded** → allowed and flagged as a revision;
+  shared dates are updated in place, new dates are added.
+- **Same month arriving by both mail and manual upload** → whichever loads
+  second wins per date, with no duplication.
 
 ---
 
