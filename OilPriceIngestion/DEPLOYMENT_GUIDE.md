@@ -235,6 +235,17 @@ The app runs with **owner's rights**. Grant the owning role `READ` on the
 `DYNAMIC_FILE_INGESTION` stage (for "Read from mail"), plus `CREATE TABLE`,
 `SELECT` and `INSERT` on `RPT_TRADERS_BM_SANDBOX`.
 
+The **Fetch new mail now** button calls `SP_MAIL_INGEST` (created in Phase 3),
+so that procedure must exist before the button works, and the app's role needs:
+
+```sql
+GRANT USAGE ON PROCEDURE DB_DW_DEV.RPT_TRADERS_BM_SANDBOX.SP_MAIL_INGEST(DATE, VARCHAR, BOOLEAN)
+  TO ROLE <app_owner_role>;
+```
+
+The procedure keeps its own `EXTERNAL_ACCESS_INTEGRATIONS = (MSGRAPH_EAI)` and
+runs `EXECUTE AS OWNER`, so the Streamlit app itself needs no external access.
+
 ### Step 3: Open App & Test
 
 1. Open Streamlit app

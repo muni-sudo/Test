@@ -38,10 +38,13 @@ UPLOAD_LOG_TABLE = "OIL_PRICE_UPLOAD_LOG"
 WAREHOUSE_NAME = "TRADER_ANALYSIS_WH"
 MAIL_STAGE_NAME = "DYNAMIC_FILE_INGESTION"
 MAIL_STAGE_FOLDER = "OILS"  # mail ingestion stages to {stage}/OILS/{date}/
+MAIL_INGEST_PROCEDURE = "SP_MAIL_INGEST"
+MAIL_INGEST_JOB_NAME = "OILS"
 MAX_MAIL_FILES_LISTED = 20
 # -------------------------------------------------------------------------
 
 FQ_UPLOAD_LOG_TABLE = f"{DATABASE_NAME}.{SCHEMA_NAME}.{UPLOAD_LOG_TABLE}"
+FQ_MAIL_INGEST_PROCEDURE = f"{DATABASE_NAME}.{SCHEMA_NAME}.{MAIL_INGEST_PROCEDURE}"
 MAIL_STAGE_PATH = f"@{DATABASE_NAME}.{SCHEMA_NAME}.{MAIL_STAGE_NAME}/{MAIL_STAGE_FOLDER}"
 BASE_COLUMNS = ["REPORT_MONTH", "SHEET_NAME", "PRICE_DATE", "DAY_TYPE", "LOAD_TIMESTAMP"]
 
@@ -256,6 +259,29 @@ def read_stage_file(stage_path: str) -> io.BytesIO:
         return io.BytesIO(stream.read())
 
 
+def fetch_new_mail() -> str:
+    """Run the mail-ingestion job now and return its '<STATUS> :: <message>' result.
+
+    Both arguments are module constants, so they are inlined rather than bound.
+    """
+    rows = session.sql(
+        f"CALL {FQ_MAIL_INGEST_PROCEDURE}"
+        f"(CURRENT_DATE(), '{MAIL_INGEST_JOB_NAME}', FALSE)"
+    ).collect()
+    return str(rows[0][0]) if rows else ""
+
+
+def show_ingest_status(status: str):
+    """Render what the ingestion procedure returned, keyed off its status prefix."""
+    head = status.split("::", 1)[0].strip().upper()
+    if head == "OK":
+        st.success(status)
+    elif head == "FAILED":
+        st.error(status)
+    else:  # NO_DATA / ALREADY_LOADED — normal outcomes, not errors
+        st.info(status)
+
+
 def render_mail_input(key: str):
     """'Read from mail' input mode. Returns (file_name, BytesIO) or (None, None).
 
@@ -268,11 +294,27 @@ def render_mail_input(key: str):
 
     st.markdown(
         f"Pick a file that was ingested from the shared mailbox "
-        f"(**'Edible & Non Edible Oils'** emails, staged to `{MAIL_STAGE_PATH}`)."
+        f"(**'Edible & Non Edible Oils'** emails, staged to `{MAIL_STAGE_PATH}`). "
+        "If a report has just arrived, **Fetch new mail now** checks the mailbox "
+        "and stages any new attachments straight away."
     )
 
-    col_refresh, _ = st.columns([1, 4])
-    if col_refresh.button("Refresh file list", key=f"{key}_mail_refresh") or files_key not in st.session_state:
+    col_fetch, col_refresh, _ = st.columns([1, 1, 3])
+    fetch_clicked = col_fetch.button("Fetch new mail now", key=f"{key}_mail_fetch")
+    refresh_clicked = col_refresh.button("Refresh file list", key=f"{key}_mail_refresh")
+
+    if fetch_clicked:
+        try:
+            with st.spinner("Checking the mailbox for new attachments..."):
+                show_ingest_status(fetch_new_mail())
+        except Exception as exc:
+            st.error(
+                f"Could not run the mail-ingestion job: {exc}\n\n"
+                f"Check that `{FQ_MAIL_INGEST_PROCEDURE}` exists and that this "
+                "app's role has USAGE on it."
+            )
+
+    if fetch_clicked or refresh_clicked or files_key not in st.session_state:
         try:
             with st.spinner("Listing mail-ingested files..."):
                 st.session_state[files_key] = list_mail_stage_files()
@@ -283,8 +325,8 @@ def render_mail_input(key: str):
     files = st.session_state.get(files_key, [])
     if not files:
         st.warning(
-            "No files found in the mail stage. The mail-ingestion job may not "
-            "have run yet, or no matching email has arrived."
+            "No files found in the mail stage. Click **Fetch new mail now** to "
+            "check the mailbox, or confirm a matching email has actually arrived."
         )
         return None, None
 

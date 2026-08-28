@@ -110,7 +110,9 @@ Upload to Snowflake Streamlit stage:
 2. Two input options on **both** tabs:
    - **Upload file** → Manual upload
    - **Read from mail** → Pick from the files staged by mail ingestion
-     (newest first, with date and size shown)
+     (newest first, with date and size shown). **Fetch new mail now** runs
+     the ingestion job on demand — no need to wait for the scheduled task —
+     and refreshes the list.
 3. Parse workbook with `excel_parser.py`
 4. Review sheet summary & data preview
 5. Confirm & load to `PRICE_NONEDIBLE_*` / `PRICE_EDIBLE_*` tables
