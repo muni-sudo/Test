@@ -122,7 +122,9 @@ RETURNS VARCHAR
 LANGUAGE PYTHON
 RUNTIME_VERSION = 3.10
 PACKAGES = ('snowflake-snowpark-python', 'requests')
-IMPORTS = ('@CODE/mail_ingestion.py', '@CODE/mail_ingest_examples.py')
+IMPORTS = ('@CODE/mail_ingestion.py', '@CODE/mail_ingest_examples.py',
+           '@CODE/io_ops.py', '@CODE/logging_util.py',
+           '@CODE/constants.py', '@CODE/credentials.py')
 HANDLER = 'mail_ingest_examples.main'
 ;
 ```

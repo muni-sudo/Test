@@ -81,7 +81,8 @@ RETURNS VARCHAR
 LANGUAGE PYTHON
 RUNTIME_VERSION = 3.10
 PACKAGES = ('snowflake-snowpark-python', 'requests')
-IMPORTS = ('@CODE/mail_ingestion.py', '@CODE/mail_ingest_examples.py', '@CODE/test_oils_ingestion.py')
+IMPORTS = ('@CODE/mail_ingestion.py', '@CODE/mail_ingest_examples.py', '@CODE/test_oils_ingestion.py',
+           '@CODE/io_ops.py', '@CODE/logging_util.py', '@CODE/constants.py', '@CODE/credentials.py')
 AS
 $$
 from test_oils_ingestion import test_oils_ingestion
