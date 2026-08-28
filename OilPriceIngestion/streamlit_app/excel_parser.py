@@ -7,17 +7,28 @@ column under that label holds dates, every column to its right is a distinct
 price series whose name is spread across the header rows above and below the
 DATE row. This module flattens each sheet into a long/tall list of ParsedRow.
 
-The two report formats differ in ways this parser handles generically:
+Both formats put qualifier rows *below* the DATE label as well as above it
+(the trading centre, "+GST", the contract month, "INR" vs "FOB/USD"), so the
+header band runs from row 1 to the first dated row. Reading only the rows
+above the DATE label leaves distinct columns sharing one name -- in the
+non-edible report that collapsed an INR and a USD castor quote into the same
+series.
 
-  NON_EDIBLE  DATE label in column A; header rows sit above it; data starts on
-              the row immediately after.
+Beyond that the formats differ in ways this parser handles generically:
+
+  NON_EDIBLE  DATE label in column A. A contract label may be printed over the
+              grid on the day a contract rolls, inside an otherwise numeric
+              price column.
   EDIBLE      DATE label is not always in column A (CASTOR starts at column F);
-              qualifier rows ("+GST", the trading centre) sit *below* the DATE
-              row; prices are often quoted as a range ("6600-6800"); sheets
-              carry side-by-side sub-tables, each with its own DATE column and
-              a MONTH/CLOSE/CHANGE futures block; and a sheet may re-declare
-              its contract-month header partway down on a row that still has a
+              prices are often quoted as a range ("6600-6800"); sheets carry
+              side-by-side sub-tables, each with its own DATE column and a
+              MONTH/CLOSE/CHANGE futures block; and a sheet may re-declare its
+              contract-month header partway down on a row that still has a
               valid date (CHINA does this when contracts roll).
+
+A column's type is decided by what it mostly holds, not by any single cell, so
+a stray contract label in a price column is recorded as that day's status and
+does not turn the column into a text column.
 
 Values are classified into: a number, a low-high range, a text label (a
 futures MONTH column), or a status token ("NA", "SUNDAY", "CLOSE", ...).
@@ -390,9 +401,16 @@ def parse_sheet(ws) -> SheetParseResult:
     for price_date in sorted(grid):
         for col, value in grid[price_date].items():
             kind, low, high, text, status = classify_value(value)
-            if col in text_cols and kind == KIND_STATUS and status:
-                # A MONTH column holding an unrecognised label is still a label.
-                kind, text, status = KIND_TEXT, status, None
+            if col in text_cols:
+                if kind == KIND_STATUS and status:
+                    # A MONTH column holding an unrecognised label is still a label.
+                    kind, text, status = KIND_TEXT, status, None
+            elif kind == KIND_TEXT:
+                # A contract label stranded in a price column marks that one day
+                # (a mid-month roll printed over the grid), so it is a status for
+                # the day -- not evidence that the column holds labels. Without
+                # this the column would be typed VARCHAR and its prices dropped.
+                kind, status, text = KIND_STATUS, text, None
             result.rows.append(ParsedRow(
                 sheet_name=ws.title,
                 series_name=series_by_col[col],
