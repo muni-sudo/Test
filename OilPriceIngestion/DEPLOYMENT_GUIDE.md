@@ -110,12 +110,12 @@ RUNTIME_VERSION = '3.10'
 PACKAGES = ('snowflake-snowpark-python', 'requests')
 EXTERNAL_ACCESS_INTEGRATIONS = (MSGRAPH_EAI)
 IMPORTS = (
-    '@DYNAMIC_FILE_INGESTION/IngestDataFromMail/mail_ingestion.py',
-    '@DYNAMIC_FILE_INGESTION/IngestDataFromMail/mail_ingest_examples.py',
-    '@DYNAMIC_FILE_INGESTION/IngestDataFromMail/io_ops.py',
-    '@DYNAMIC_FILE_INGESTION/IngestDataFromMail/logging_util.py',
-    '@DYNAMIC_FILE_INGESTION/IngestDataFromMail/constants.py',
-    '@DYNAMIC_FILE_INGESTION/IngestDataFromMail/credentials.py'
+    '@OILPRICEINGESTION/mail_ingestion/mail_ingestion.py',
+    '@OILPRICEINGESTION/mail_ingestion/mail_ingest_examples.py',
+    '@OILPRICEINGESTION/mail_ingestion/credentials.py',
+    '@OILPRICEINGESTION/supporting_modules/io_ops.py',
+    '@OILPRICEINGESTION/supporting_modules/logging_util.py',
+    '@OILPRICEINGESTION/supporting_modules/constants.py'
 )
 HANDLER = 'mail_ingest_examples.main'
 EXECUTE AS OWNER
@@ -124,6 +124,25 @@ $$
 from mail_ingest_examples import main
 $$;
 ```
+
+**The `IMPORTS` paths must match where the files actually sit on the stage.**
+The paths above assume the project folders were uploaded as-is (the layout of
+the delivered zip):
+
+```
+@OILPRICEINGESTION/
+├── mail_ingestion/       mail_ingestion.py, mail_ingest_examples.py,
+│                         credentials.py, test_oils_ingestion.py
+├── supporting_modules/   io_ops.py, logging_util.py, constants.py
+└── streamlit_app/        streamlit_app.py, excel_parser.py, environment.yml
+```
+
+Confirm with `LIST @OILPRICEINGESTION;` before creating the procedure — a
+wrong path fails at CREATE time with "Remote file ... was not found".
+
+Subfolders matter only for locating the file: Snowflake copies each import
+into one flat directory on the Python path, so `supporting_modules/io_ops.py`
+is imported in code as `import io_ops`, not `import supporting_modules.io_ops`.
 
 ### Step 3: Create Test Procedure
 

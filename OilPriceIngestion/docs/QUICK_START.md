@@ -31,12 +31,12 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.10'
 PACKAGES = ('snowflake-snowpark-python', 'requests')
 IMPORTS = (
-    '@DYNAMIC_FILE_INGESTION/mail_ingestion.py',
-    '@DYNAMIC_FILE_INGESTION/mail_ingest_examples.py',
-    '@DYNAMIC_FILE_INGESTION/io_ops.py',
-    '@DYNAMIC_FILE_INGESTION/logging_util.py',
-    '@DYNAMIC_FILE_INGESTION/constants.py',
-    '@DYNAMIC_FILE_INGESTION/credentials.py'
+    '@OILPRICEINGESTION/mail_ingestion/mail_ingestion.py',
+    '@OILPRICEINGESTION/mail_ingestion/mail_ingest_examples.py',
+    '@OILPRICEINGESTION/mail_ingestion/credentials.py',
+    '@OILPRICEINGESTION/supporting_modules/io_ops.py',
+    '@OILPRICEINGESTION/supporting_modules/logging_util.py',
+    '@OILPRICEINGESTION/supporting_modules/constants.py'
 )
 HANDLER = 'mail_ingest_examples.main'
 EXECUTE AS OWNER
@@ -51,13 +51,13 @@ LANGUAGE PYTHON
 RUNTIME_VERSION = '3.10'
 PACKAGES = ('snowflake-snowpark-python', 'requests')
 IMPORTS = (
-    '@DYNAMIC_FILE_INGESTION/mail_ingestion.py',
-    '@DYNAMIC_FILE_INGESTION/mail_ingest_examples.py',
-    '@DYNAMIC_FILE_INGESTION/test_oils_ingestion.py',
-    '@DYNAMIC_FILE_INGESTION/io_ops.py',
-    '@DYNAMIC_FILE_INGESTION/logging_util.py',
-    '@DYNAMIC_FILE_INGESTION/constants.py',
-    '@DYNAMIC_FILE_INGESTION/credentials.py'
+    '@OILPRICEINGESTION/mail_ingestion/mail_ingestion.py',
+    '@OILPRICEINGESTION/mail_ingestion/mail_ingest_examples.py',
+    '@OILPRICEINGESTION/mail_ingestion/test_oils_ingestion.py',
+    '@OILPRICEINGESTION/mail_ingestion/credentials.py',
+    '@OILPRICEINGESTION/supporting_modules/io_ops.py',
+    '@OILPRICEINGESTION/supporting_modules/logging_util.py',
+    '@OILPRICEINGESTION/supporting_modules/constants.py'
 )
 HANDLER = 'test_oils_ingestion.test_oils_ingestion'
 EXECUTE AS OWNER
